@@ -3,39 +3,75 @@ package btfubackup
 import java.io.File
 import java.nio.file.Path
 
+import net.minecraft.server.dedicated.DedicatedServer
 import net.minecraftforge.common.MinecraftForge
-import net.minecraftforge.fml.common.Mod.EventHandler
-import net.minecraftforge.fml.common.event.{FMLPreInitializationEvent, FMLServerAboutToStartEvent, FMLServerStoppingEvent}
-import net.minecraftforge.fml.common.eventhandler.SubscribeEvent
-import net.minecraftforge.fml.common.gameevent.TickEvent
-import net.minecraftforge.fml.common.gameevent.TickEvent.ServerTickEvent
-import net.minecraftforge.fml.common.{FMLCommonHandler, FMLLog, Mod}
-import org.apache.logging.log4j.Logger
+import net.minecraftforge.event.TickEvent
+import net.minecraftforge.event.TickEvent.ServerTickEvent
+import net.minecraftforge.eventbus.api.SubscribeEvent
+import net.minecraftforge.fml.ModLoadingContext
+import net.minecraftforge.fml.common.Mod
+import net.minecraftforge.fml.config.ModConfig
+import net.minecraftforge.fml.event.server.{FMLServerAboutToStartEvent, FMLServerStoppingEvent}
+import org.apache.logging.log4j.{LogManager, Logger}
 
-@Mod(modid = "btfu", version = "1", name = "BTFU", modLanguage = "scala", acceptableRemoteVersions="*") object BTFU {
-  var cfg:BTFUConfig = null
-  var logger:Logger = null
+object BTFU {
+  var cfg: BTFUConfig = BTFUConfig(BTFUConfig.spec.getValues)
+  var logger: Logger = LogManager.getLogger("BTFU")
   var serverLive = false
+  var performer: Option[BTFUPerformer] = None
+}
 
-  import net.minecraftforge.fml.common.SidedProxy
+@Mod("btfu") class BTFU {
+  ModLoadingContext.get().registerConfig(ModConfig.Type.COMMON, BTFUConfig.spec)
 
-  @SidedProxy(clientSide = "btfubackup.ClientProxy", serverSide = "btfubackup.ServerProxy") var proxy: CommonProxy = null
+  ExtensionPoints.register()
+  MinecraftForge.EVENT_BUS.register(this)
 
-  @EventHandler
-  def init(e: FMLPreInitializationEvent): Unit = {
-    logger = e.getModLog
+  @SubscribeEvent
+  def onServerTick(event: ServerTickEvent): Unit = {
+    if (event.phase == TickEvent.Phase.START) {
+      BTFU.performer.foreach { p =>
+        p.tick()
+      }
+    }
+  }
 
-    cfg = BTFUConfig(e.getSuggestedConfigurationFile)
+  /**
+    * @param path to check
+    * @return Some(errormessage) if there is a problem, or None if the backup path is acceptable
+    */
+  def startupPathChecks(path: Path): Option[String] = {
+    if (path.equals(BTFU.cfg.mcDir))
+      return Some("Backups directory is not set or matches your minecraft directory.")
 
-    startupPathChecks(cfg.backupDir).foreach { error =>
-      (if (cfg.disablePrompts) None else proxy.getDedicatedServerInstance) match {
-        case Some(dedi) =>
+    if (! path.toFile.exists())
+      return Some(s"Backups directory ${'"'}$path${'"'} does not exist.")
+
+    if (FileActions.subdirectoryOf(path, BTFU.cfg.mcDir))
+      return Some(s"Backups directory ${'"'}$path${'"'} is inside your minecraft directory ${'"'}${BTFU.cfg.mcDir}${'"'}.\n" +
+        s"This mod backups your entire minecraft directory, so that won't work.")
+
+    if (FileActions.subdirectoryOf(BTFU.cfg.mcDir, path))
+      return Some(s"Backups directory ${'"'}$path${'"'} encompasses your minecraft server!\n" +
+        s"(are you trying to run a backup without copying it, or back up to a directory your minecraft server is in?)")
+
+    None
+  }
+
+  @SubscribeEvent
+  def start(e: FMLServerAboutToStartEvent): Unit = {
+    // Pull config again
+    BTFU.cfg = BTFUConfig(BTFUConfig.spec.getValues)
+
+    startupPathChecks(BTFU.cfg.backupDir).foreach { error =>
+      e.getServer match {
+        case dedi: DedicatedServer =>
           btfubanner()
           var pathCheck: Option[String] = Some(error)
           var enteredPath: Path = null
           do {
-            logger.error(pathCheck.get)
-            logger.error("Please enter a new path and press enter (or exit out and edit btfu.cfg)")
+            BTFU.logger.error(pathCheck.get)
+            BTFU.logger.error("Please enter a new path and press enter (or exit out and edit btfu-common.toml)")
 
             val cmd = {
               while (dedi.pendingCommandList.isEmpty && dedi.isServerRunning) {
@@ -49,82 +85,48 @@ import org.apache.logging.log4j.Logger
             pathCheck = startupPathChecks(enteredPath)
           } while (pathCheck.isDefined)
 
-          logger.error(s"Awesome!  Your backups will go in $enteredPath.  I will shut up until something goes wrong!")
-          cfg.setBackupDir(enteredPath)
-        case None =>
+          BTFU.logger.error(s"Awesome!  Your backups will go in $enteredPath.  I will shut up until something goes wrong!")
+          BTFU.cfg.setBackupDir(enteredPath)
+        case server =>
           btfubanner()
-          logger.error(s"/============================================================")
-          logger.error(s"| $error")
-          logger.error(s"| Please configure the backup path in btfu.cfg.")
-          logger.error(s"\\============================================================")
+          BTFU.logger.error(s"/============================================================")
+          BTFU.logger.error(s"| $error")
+          BTFU.logger.error(s"| Please configure the backup path in btfu-common.toml.")
+          BTFU.logger.error(s"\\============================================================")
 
-          FMLCommonHandler.instance().exitJava(1, false)
+          server.initiateShutdown(false)
       }
     }
 
-    val handler = new Object {
-      @SubscribeEvent
-      def onServerTick(event: ServerTickEvent): Unit = {
-        if (event.phase == TickEvent.Phase.START) {
-          BTFUPerformer.tick()
-        }
-      }
-    }
-    MinecraftForge.EVENT_BUS.register(handler)
+    BTFU.performer = Some(new BTFUPerformer(e.getServer))
+    BTFU.serverLive = true
+    BTFU.performer.foreach { p => p.scheduleNextRun() }
   }
 
-  /**
-    * @param path to check
-    * @return Some(errormessage) if there is a problem, or None if the backup path is acceptable
-    */
-  def startupPathChecks(path: Path): Option[String] = {
-    if (path.equals(cfg.mcDir))
-      return Some("Backups directory is not set or matches your minecraft directory.")
-
-    if (! path.toFile.exists())
-      return Some(s"Backups directory ${'"'}$path${'"'} does not exist.")
-
-    if (FileActions.subdirectoryOf(path, cfg.mcDir))
-      return Some(s"Backups directory ${'"'}$path${'"'} is inside your minecraft directory ${'"'}${cfg.mcDir}${'"'}.\n" +
-        s"This mod backups your entire minecraft directory, so that won't work.")
-
-    if (FileActions.subdirectoryOf(cfg.mcDir, path))
-      return Some(s"Backups directory ${'"'}$path${'"'} encompasses your minecraft server!\n" +
-        s"(are you trying to run a backup without copying it, or back up to a directory your minecraft server is in?)")
-
-    None
-  }
-
-  @EventHandler
-  def start(e: FMLServerAboutToStartEvent): Unit = {
-    serverLive = true
-    BTFUPerformer.scheduleNextRun()
-  }
-
-  @EventHandler
+  @SubscribeEvent
   def stop(e: FMLServerStoppingEvent): Unit = {
-    serverLive = false
-    BTFUPerformer.nextRun = None
+    BTFU.serverLive = false
+    BTFU.performer.foreach { p => p.nextRun = None }
   }
 
   def btfubanner(): Unit = {
-    logger.error("               ,'\";-------------------;\"`.")
-    logger.error("               ;[]; BBB  TTT FFF U  U ;[];")
-    logger.error("               ;  ; B  B  T  F   U  U ;  ;")
-    logger.error("               ;  ; B  B  T  F   U  U ;  ;")
-    logger.error("               ;  ; BBB   T  FFF U  U ;  ;")
-    logger.error("               ;  ; B  B  T  F   U  U ;  ;")
-    logger.error("               ;  ; B  B  T  F   U  U ;  ;")
-    logger.error("               ;  ; BBB   T  F    UU  ;  ;")
-    logger.error("               ;  `.                 ,'  ;")
-    logger.error("               ;    \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"    ;")
-    logger.error("               ;    ,-------------.---.  ;")
-    logger.error("               ;    ;  ;\"\";       ;   ;  ;")
-    logger.error("               ;    ;  ;  ;       ;   ;  ;")
-    logger.error("               ;    ;  ;  ;       ;   ;  ;")
-    logger.error("               ;//||;  ;  ;       ;   ;||;")
-    logger.error("               ;\\\\||;  ;__;       ;   ;\\/;")
-    logger.error("                `. _;          _  ;  _;  ;")
-    logger.error("                  \" \"\"\"\"\"\"\"\"\"\"\" \"\"\"\"\" \"\"\"")
+    BTFU.logger.error("               ,'\";-------------------;\"`.")
+    BTFU.logger.error("               ;[]; BBB  TTT FFF U  U ;[];")
+    BTFU.logger.error("               ;  ; B  B  T  F   U  U ;  ;")
+    BTFU.logger.error("               ;  ; B  B  T  F   U  U ;  ;")
+    BTFU.logger.error("               ;  ; BBB   T  FFF U  U ;  ;")
+    BTFU.logger.error("               ;  ; B  B  T  F   U  U ;  ;")
+    BTFU.logger.error("               ;  ; B  B  T  F   U  U ;  ;")
+    BTFU.logger.error("               ;  ; BBB   T  F    UU  ;  ;")
+    BTFU.logger.error("               ;  `.                 ,'  ;")
+    BTFU.logger.error("               ;    \"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"\"    ;")
+    BTFU.logger.error("               ;    ,-------------.---.  ;")
+    BTFU.logger.error("               ;    ;  ;\"\";       ;   ;  ;")
+    BTFU.logger.error("               ;    ;  ;  ;       ;   ;  ;")
+    BTFU.logger.error("               ;    ;  ;  ;       ;   ;  ;")
+    BTFU.logger.error("               ;//||;  ;  ;       ;   ;||;")
+    BTFU.logger.error("               ;\\\\||;  ;__;       ;   ;\\/;")
+    BTFU.logger.error("                `. _;          _  ;  _;  ;")
+    BTFU.logger.error("                  \" \"\"\"\"\"\"\"\"\"\"\" \"\"\"\"\" \"\"\"")
   }
 }

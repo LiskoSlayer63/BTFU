@@ -3,29 +3,39 @@ package btfubackup
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.Executors
 
-import scala.concurrent.Future
-import scala.util.{Success, Try}
+import btfubackup.BTFU.cfg
+import net.minecraft.server.MinecraftServer
 
-import BTFU.cfg
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService, Future}
+import scala.util.{Failure, Success, Try}
 
-import scala.concurrent.ExecutionContext.Implicits.global
-
-object BTFUPerformer {
+class BTFUPerformer (val server: MinecraftServer) {
   var nextRun: Option[Long] = None
   var backupProcess: Option[BackupProcess] = None
-
-  val dateFormat = new SimpleDateFormat(s"yyyy-MM-dd_HH${
-    if (System.getProperty("os.name").startsWith("Windows")) "." else ":" // windows can't have colons in filenames
-  }mm")
+  val worldSavingControl = new WorldSavingControl(server)
 
   def scheduleNextRun(): Unit = { nextRun = Some(System.currentTimeMillis + 1000 * 60 * 5) }
 
+  def scheduleNextRun(time: Long): Unit = {
+    nextRun = Some(time)
+  }
+
   def tick(): Unit = {
-    WorldSavingControl.mainThreadTick()
+    worldSavingControl.mainThreadTick()
 
     backupProcess.foreach{ p =>
       if (p.isCompleted) {
+        p.futureTask.value.foreach {
+          case Failure(exception) =>
+            BTFU.logger.error("Backup process failed!", exception)
+            BTFU.logger.error("====== ATTENTION ATTENTION ATTENTION ======")
+            BTFU.logger.error("| BACKUP FAILED, YOU DO NOT HAVE A BACKUP |")
+            BTFU.logger.error("===========================================")
+          case Success(_) => ()
+        }
+
         backupProcess = None
         if (BTFU.serverLive) scheduleNextRun()
       }
@@ -33,14 +43,23 @@ object BTFUPerformer {
 
     nextRun.foreach{ mils =>
       if (System.currentTimeMillis() >= mils && backupProcess.isEmpty) {
-        backupProcess = Some(new BackupProcess())
+        backupProcess = Some(new BackupProcess(worldSavingControl))
         BTFU.logger.debug("Starting scheduled backup")
       }
     }
   }
 }
 
-class BackupProcess {
+object BTFUPerformer {
+  val dateFormat = new SimpleDateFormat(s"yyyy-MM-dd_HH${
+    if (System.getProperty("os.name").startsWith("Windows")) "." else ":" // windows can't have colons in filenames
+  }mm")
+
+  implicit val executor: ExecutionContextExecutorService =
+    ExecutionContext.fromExecutorService(Executors.newCachedThreadPool())
+}
+
+class BackupProcess (val worldSavingControl: WorldSavingControl) {
   val fileActions = if (cfg.systemless) JvmNativeFileActions else ExternalCommandFileActions
   val modelDir = cfg.backupDir.resolve("model")
   val tmpDir = cfg.backupDir.resolve("tmp")
@@ -53,7 +72,9 @@ class BackupProcess {
   private def deleteTmp() = deleteBackup("tmp") // clean incomplete backup copies
   private def deleteBackup(name: String) = fileActions.delete(new File(s"${cfg.backupDir}/$name"))
 
-  val futureTask = Future{task()}
+  import BTFUPerformer.executor
+
+  val futureTask: Future[Unit] = Future { task() }
   private def task(): Unit = {
     /**
       * Phase 1: trim backups
@@ -62,13 +83,17 @@ class BackupProcess {
       deleteTmp()
 
       var backups = datestampedBackups
-      val newestTime = backups.head._2
       if (cfg.maxAgeSec > 0) {
-        datestampedBackups.dropWhile{case (_, time) => newestTime - time <= 1000 * cfg.maxAgeSec}.drop(1)
-          .foreach { case (name, _) =>
-            BTFU.logger.debug(s"Trimming old backup $name")
-            deleteBackup(name)
-          }
+        backups.headOption.map(_._2) match {
+          case Some(newestTime) =>
+            backups.dropWhile{case (_, time) => newestTime - time <= 1000 * cfg.maxAgeSec}.drop(1)
+              .foreach { case (name, _) =>
+                BTFU.logger.debug(s"Trimming old backup $name")
+                deleteBackup(name)
+              }
+          case None =>
+            BTFU.logger.debug("No old backups, skipping")
+        }
       }
 
       while ({backups = datestampedBackups; backups.length + 1 > cfg.maxBackups}) {
@@ -84,11 +109,12 @@ class BackupProcess {
     /**
       * Phase 2: rsync
       */
-    BTFU.logger.debug("Rsyncing...")
-    WorldSavingControl.saveOffAndFlush()
+    BTFU.logger.info("Saving world...")
+    worldSavingControl.saveOffAndFlush()
     val backupDatestamp = System.currentTimeMillis() // used later
+    BTFU.logger.info("Rsyncing...")
     val rsyncSuccess = fileActions.sync(cfg.mcDir, modelDir, BTFU.cfg.excludes)
-    WorldSavingControl.restoreSaving()
+    worldSavingControl.restoreSaving()
     if (! rsyncSuccess) { // if we aborted here, we just have a partial rsync that can be corrected next time
       BTFU.logger.warn("rsync failed")
       return
@@ -110,7 +136,7 @@ class BackupProcess {
     if (! tmpDir.toFile.renameTo(cfg.backupDir.resolve(datestr).toFile))
       BTFU.logger.warn("rename failure??")
     else
-      BTFU.logger.debug(s"backup success: $datestr")
+      BTFU.logger.debug(s"Backup succeeded: $datestr")
   }
 
   def isCompleted = futureTask.isCompleted

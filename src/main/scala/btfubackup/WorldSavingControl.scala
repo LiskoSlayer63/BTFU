@@ -1,8 +1,8 @@
 package btfubackup
 
-import net.minecraftforge.fml.common.FMLCommonHandler
+import net.minecraft.server.MinecraftServer
 
-object WorldSavingControl {
+class WorldSavingControl (val server: MinecraftServer) {
   private val lock = new Object()
   private var task:Int = 0
 
@@ -19,7 +19,7 @@ object WorldSavingControl {
     }
   }
 
-  private def waitPerformTask(t: Int) {
+  private def waitPerformTask(t: Int): Unit = {
     lock.synchronized{
       if (task != 0) throw new RuntimeException(s"Simultaneously scheduled WorldSavingControl tasks, $t and $task, are there multiple BTFU threads??")
       task = t
@@ -30,31 +30,30 @@ object WorldSavingControl {
   /**
     * blocks while waiting for the save-off and flush to be performed on the main thread
     */
-  def saveOffAndFlush() = waitPerformTask(1)
+  def saveOffAndFlush(): Unit = waitPerformTask(1)
 
   /**
     * blocks while waiting for the save-on to be performed on the main thread
     */
-  def restoreSaving() = waitPerformTask(2)
+  def restoreSaving(): Unit = waitPerformTask(2)
 
-  private def realSaveTasks(t: Int) = {
+  private def realSaveTasks(t: Int): Unit = {
     t match {
       case 1 => // save-off and save-all
-        FMLCommonHandler.instance.getMinecraftServerInstance.worlds.foreach { worldserver =>
+        server.getWorlds.forEach { worldserver =>
           if (worldserver != null) {
             worldserver.disableLevelSaving = false
-            worldserver.saveAllChunks(true, null)
             try {
-              worldserver.flushToDisk()
+              worldserver.save(null, true, false)
             } catch {
-              case e: Throwable => BTFU.logger.warn("Exception from WorldServer.saveChunkData", e)
+              case e: Throwable => BTFU.logger.warn("Exception from WorldServer.save", e)
             }
 
             worldserver.disableLevelSaving = true
           }
         }
       case 2 => // save-on
-        FMLCommonHandler.instance.getMinecraftServerInstance.worlds.foreach { worldserver =>
+        server.getWorlds.forEach { worldserver =>
           if (worldserver != null) {
             worldserver.disableLevelSaving = false
           }
