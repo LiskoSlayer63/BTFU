@@ -44,7 +44,7 @@ class BTFUPerformer (val server: MinecraftServer) {
     nextRun.foreach{ mils =>
       if (System.currentTimeMillis() >= mils && backupProcess.isEmpty) {
         backupProcess = Some(new BackupProcess(worldSavingControl))
-        BTFU.logger.debug("Starting scheduled backup")
+        BTFU.logger.info("Starting scheduled backup")
       }
     }
   }
@@ -88,7 +88,7 @@ class BackupProcess (val worldSavingControl: WorldSavingControl) {
           case Some(newestTime) =>
             backups.dropWhile{case (_, time) => newestTime - time <= 1000 * cfg.maxAgeSec}.drop(1)
               .foreach { case (name, _) =>
-                BTFU.logger.debug(s"Trimming old backup $name")
+                BTFU.logger.info(s"Trimming old backup $name")
                 deleteBackup(name)
               }
           case None =>
@@ -101,7 +101,7 @@ class BackupProcess (val worldSavingControl: WorldSavingControl) {
           case List((_, d1), (s, _), (_, d0)) =>
             (s, 1000000*(backups.head._2 - d0)/(d1 - d0)) // fitness score for removal
         }.maxBy(_._2)._1
-        BTFU.logger.debug(s"Trimming backup $toRemove")
+        BTFU.logger.info(s"Trimming backup $toRemove")
         deleteBackup(s"$toRemove")
       }
     }
@@ -136,7 +136,7 @@ class BackupProcess (val worldSavingControl: WorldSavingControl) {
     if (! tmpDir.toFile.renameTo(cfg.backupDir.resolve(datestr).toFile))
       BTFU.logger.warn("rename failure??")
     else
-      BTFU.logger.debug(s"Backup succeeded: $datestr")
+      BTFU.logger.info(s"Backup succeeded: $datestr")
   }
 
   def isCompleted = futureTask.isCompleted
