@@ -16,7 +16,9 @@ class BTFUPerformer (val server: MinecraftServer) {
   var backupProcess: Option[BackupProcess] = None
   val worldSavingControl = new WorldSavingControl(server)
 
-  def scheduleNextRun(): Unit = { nextRun = Some(System.currentTimeMillis + 1000 * 60 * 5) }
+  def periodMillis: Int = cfg.backupPeriod * 60 * 1000
+
+  def scheduleNextRun(): Unit = { nextRun = Some(System.currentTimeMillis + periodMillis) }
 
   def scheduleNextRun(time: Long): Unit = {
     nextRun = Some(time)

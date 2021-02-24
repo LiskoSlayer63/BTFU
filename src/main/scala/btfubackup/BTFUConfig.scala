@@ -9,7 +9,8 @@ import net.minecraftforge.common.ForgeConfigSpec
 import scala.jdk.CollectionConverters._
 
 case class BTFUConfig (var backupDirProp: ForgeConfigSpec.ConfigValue[String], maxBackups: Int, disablePrompts: Boolean,
-                       cmds: BTFUNativeCommands, systemless: Boolean, excludes: Iterable[String], maxAgeSec: Int) {
+                       cmds: BTFUNativeCommands, systemless: Boolean, excludes: Iterable[String], maxAgeSec: Int,
+                       backupPeriod: Int) {
   val mcDir = FileActions.canonicalize(new File(".").toPath)
 
   def backupDir: Path = {
@@ -55,6 +56,9 @@ object BTFUConfig {
   builder.comment("number of backups to keep")
     .define("backupCount", 128)
 
+  builder.comment("time between backups in minutes")
+    .define("backupPeriod", 5)
+
   builder.comment("disable interactive prompts if true")
     .define("disableInteractive", false)
 
@@ -85,7 +89,8 @@ object BTFUConfig {
       (BTFUNativeCommands.apply _).tupled(commands),
       systemless,
       c.get[ForgeConfigSpec.ConfigValue[java.util.List[String]]]("btfu.exclude").get().asScala,
-      60*60*24*c.get[ForgeConfigSpec.IntValue]("btfu.maxBackupAge").get()
+      60*60*24*c.get[ForgeConfigSpec.IntValue]("btfu.maxBackupAge").get(),
+      c.get[ForgeConfigSpec.IntValue]("btfu.backupPeriod").get()
     )
     conf
   }
