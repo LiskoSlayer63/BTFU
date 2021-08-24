@@ -63,9 +63,9 @@ object BTFUConfig {
     .define("disableInteractive", false)
 
   builder.comment("excluded paths",
-    "For normal operation, see rsync manual for --exclude.  For systemless mode, see java.nio.file.PathMatcher.",
+    "For normal operation, see rsync manual for --exclude.  For systemless mode, see java.nio.file.PathMatcher (prefix \"glob:\" is used by internal code, do not add it).",
     "Patterns are for relative paths from the server root."
-  ).define("exclude", List.empty[String].asJava)
+  ).defineList("exclude", List.empty[String].asJava, o => o != null && o.isInstanceOf[String])
 
   builder.comment("maximum backup age",
     "Backups older than this many days will be deleted prior to logarithmic pruning, -1 to keep a complete history"

@@ -6,7 +6,7 @@ showAsResourcePack = false
 
 [[mods]]
 modId = "btfu"
-version = "2.5.0"
+version = "2.5.1"
 entryClass = "btfubackup.BTFU"
 displayName = "BTFU"
 displayURL = "https://github.com/elytra/BTFU"
